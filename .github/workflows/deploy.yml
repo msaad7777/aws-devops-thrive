@@ -7,6 +7,8 @@ on:
 env:
   AWS_REGION: us-east-1
   ECR_REPO_NAME: aws-devops-thrive-app
+  TF_IN_AUTOMATION: "1"
+  TF_INPUT: "false"
 
 jobs:
   deploy:
@@ -29,36 +31,132 @@ jobs:
 
     - name: Extract ECR repository URI
       run: |
+        set -e
         REPO_URI=$(aws ecr describe-repositories \
-          --repository-names $ECR_REPO_NAME \
-          --region $AWS_REGION \
+          --repository-names "$ECR_REPO_NAME" \
+          --region "$AWS_REGION" \
           --query 'repositories[0].repositoryUri' \
           --output text)
         echo "REPO_URI=$REPO_URI" >> $GITHUB_ENV
 
     - name: Build Docker image
-      run: |
-        docker build -t ${{ env.REPO_URI }}:latest ./app
+      run: docker build -t "${{ env.REPO_URI }}:latest" ./app
 
     - name: Push Docker image to ECR
-      run: |
-        docker push ${{ env.REPO_URI }}:latest
+      run: docker push "${{ env.REPO_URI }}:latest"
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.8.5
 
-    - name: Terraform Init
-      run: terraform init
+    - name: Terraform Fmt & Validate
       working-directory: ./terraform
+      run: |
+        terraform fmt -check -recursive
+        terraform init -lock-timeout=5m
+        terraform validate
 
-    - name: Terraform Plan
-      run: terraform plan -var="docker_image=${{ env.REPO_URI }}:latest"
+    - name: Reconcile Terraform state (import if missing / remap if different)
       working-directory: ./terraform
+      shell: bash
+      run: |
+        set -euo pipefail
 
-    - name: Terraform Apply
-      run: terraform apply -auto-approve -var="docker_image=${{ env.REPO_URI }}:latest"
+        ensure_import () {
+          local tf_addr="$1"   # terraform address, e.g., aws_security_group.web_sg
+          local id="$2"        # import id (ARN/ID/Name depending on type)
+          if [[ -z "${id}" || "${id}" == "None" ]]; then
+            echo "No existing resource for ${tf_addr}; skip."
+            return 0
+          fi
+          if terraform state show "${tf_addr}" >/dev/null 2>&1; then
+            current_id=$(terraform state show "${tf_addr}" | awk '/^id = / {print $3}')
+            if [[ "${current_id}" != "${id}" ]]; then
+              echo "Remapping ${tf_addr}: state=${current_id} -> aws=${id}"
+              terraform state rm "${tf_addr}"
+              terraform import "${tf_addr}" "${id}"
+            else
+              echo "${tf_addr} ok."
+            fi
+          else
+            echo "Importing ${tf_addr} -> ${id}"
+            terraform import "${tf_addr}" "${id}"
+          fi
+        }
+
+        # --- Discover IDs/ARNs ---
+        WEB_SG_ID=$(aws ec2 describe-security-groups \
+          --filters Name=group-name,Values=${PROJECT_NAME:-aws-devops-thrive}-web-sg \
+          --query 'SecurityGroups[0].GroupId' --output text || true)
+
+        ALB_SG_ID=$(aws ec2 describe-security-groups \
+          --filters Name=group-name,Values=${PROJECT_NAME:-aws-devops-thrive}-alb-sg \
+          --query 'SecurityGroups[0].GroupId' --output text || true)
+
+        ECR_NAME="${ECR_REPO_NAME}"
+
+        ALB_ARN=$(aws elbv2 describe-load-balancers \
+          --names ${PROJECT_NAME:-aws-devops-thrive}-alb \
+          --query 'LoadBalancers[0].LoadBalancerArn' --output text || true)
+
+        TG_ARN=$(aws elbv2 describe-target-groups \
+          --names ${PROJECT_NAME:-aws-devops-thrive}-tg \
+          --query 'TargetGroups[0].TargetGroupArn' --output text || true)
+
+        LISTENER_80_ARN=""
+        if [[ -n "${ALB_ARN}" && "${ALB_ARN}" != "None" ]]; then
+          LISTENER_80_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "${ALB_ARN}" \
+            --query 'Listeners[?Port==`80`].ListenerArn | [0]' --output text || true)
+        fi
+
+        # Optional HTTPS
+        LISTENER_443_ARN=""
+        if [[ -n "${ALB_ARN}" && "${ALB_ARN}" != "None" ]]; then
+          LISTENER_443_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "${ALB_ARN}" \
+            --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text || true)
+        fi
+
+        # ASG + Launch Template
+        ASG_NAME=$(aws autoscaling describe-auto-scaling-groups \
+          --query "AutoScalingGroups[?AutoScalingGroupName=='${PROJECT_NAME:-aws-devops-thrive}-asg'].AutoScalingGroupName | [0]" \
+          --output text || true)
+
+        LT_ID=$(aws ec2 describe-launch-templates \
+          --filters Name=launch-template-name,Values="${PROJECT_NAME:-aws-devops-thrive}-lt-*" \
+          --query 'LaunchTemplates[0].LaunchTemplateId' --output text || true)
+
+        # --- Import / Remap ---
+        ensure_import aws_security_group.web_sg "${WEB_SG_ID}"
+        ensure_import aws_security_group.alb_sg "${ALB_SG_ID}"
+        ensure_import aws_ecr_repository.app_repo "${ECR_NAME}"  # import key is NAME
+        ensure_import aws_lb.app_alb "${ALB_ARN}"
+        ensure_import aws_lb_target_group.app_tg "${TG_ARN}"
+        ensure_import aws_lb_listener.app_listener "${LISTENER_80_ARN}"
+        if [[ -n "${LISTENER_443_ARN}" && "${LISTENER_443_ARN}" != "None" ]]; then
+          ensure_import aws_lb_listener.https "${LISTENER_443_ARN}"
+        fi
+        ensure_import aws_autoscaling_group.app_asg "${ASG_NAME}"
+        ensure_import aws_launch_template.app_lt "${LT_ID}"
+
+    - name: Terraform Plan (save plan file)
       working-directory: ./terraform
+      run: |
+        terraform plan -no-color -lock-timeout=5m \
+          -var="docker_image=${{ env.REPO_URI }}:latest" \
+          -out=tfplan.binary
+        terraform show -no-color tfplan.binary > tfplan.txt
+
+    - name: Upload plan artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: tf-plan
+        path: terraform/tfplan.txt
+
+    - name: Terraform Apply (using saved plan)
+      working-directory: ./terraform
+      run: terraform apply -lock-timeout=5m -auto-approve tfplan.binary
 
     - name: Show Output
-      run: terraform output
       working-directory: ./terraform
+      run: terraform output -json
