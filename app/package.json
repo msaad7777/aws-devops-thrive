@@ -1,0 +1,11 @@
+{
+  "name": "aws-devops-thrive",
+  "version": "1.0.0",
+  "description": "Simple Hello World Node.js app for AWS deployment",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "author": "Mohammed Saad",
+  "license": "MIT"
+}
