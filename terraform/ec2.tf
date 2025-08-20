@@ -14,22 +14,17 @@ resource "aws_instance" "app_server" {
               systemctl start docker
               usermod -aG docker ec2-user
               
-              # Install Docker Compose
               curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
               chmod +x /usr/local/bin/docker-compose
               ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
               
-              # Clone the repo
               yum install -y git
               git clone https://github.com/msaad7777/aws-devops-thrive.git /home/ec2-user/app
 
-              # Go to the correct subfolder
               cd /home/ec2-user/app/app
               
-              # Set up .env
               echo "DOCKER_IMAGE=${var.docker_image}" > .env
 
-              # Build and run with Docker Compose
               docker-compose up -d --build
               EOF
 
@@ -37,6 +32,5 @@ resource "aws_instance" "app_server" {
     Name = "AppEC2"
   }
 
-  # Ensure security group is created before instance
   depends_on = [aws_security_group.web_sg]
 }
