@@ -1,20 +1,17 @@
-# Use Node.js LTS base image
+# Simple Node base image
 FROM node:18
 
-# Set working directory
+# App files
 WORKDIR /usr/src/app
-
-# Copy package files
-COPY package*.json ./
-
-# Install dependencies
-RUN npm install
-
-# Copy source code
 COPY . .
 
-# Expose port
-EXPOSE 80
+# App listens on 3000 inside the container
+ENV NODE_ENV=production
+ENV PORT=3000
+EXPOSE 3000
 
-# Start app
-CMD ["npm", "start"]
+# Healthcheck needs curl inside the container
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# No deps required (plain Node http server)
+CMD ["node", "index.js"]
