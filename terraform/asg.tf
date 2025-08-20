@@ -51,9 +51,14 @@ resource "aws_iam_role_policy_attachment" "cw_agent" {
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
 
-# CloudWatch log groups
-resource "aws_cloudwatch_log_group" "messages" {
-  name              = "/aws/${var.project_name}/messages"
+# CloudWatch log groups (bootstrap + compose logs)
+resource "aws_cloudwatch_log_group" "cloud_init" {
+  name              = "/aws/${var.project_name}/cloud-init"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "user_data" {
+  name              = "/aws/${var.project_name}/user-data"
   retention_in_days = 14
 }
 
@@ -87,27 +92,33 @@ resource "aws_launch_template" "app_lt" {
 #!/bin/bash
 set -euxo pipefail
 
+
+exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
+echo "[user-data] Starting bootstrap at $(date)"
+
 export AWS_DEFAULT_REGION="${var.aws_region}"
 export PROJECT_NAME="${var.project_name}"
 
 
 dnf -y update
-dnf -y install docker jq awscli
+dnf -y install docker jq awscli curl
 
-systemctl enable docker
-systemctl start docker
+systemctl enable --now docker
 usermod -aG docker ec2-user || true
 
-curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
-  -o /usr/local/bin/docker-compose
+
+echo "[user-data] Installing docker-compose"
+curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 chmod +x /usr/local/bin/docker-compose
 ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
+docker-compose version || true
 
 
 if [[ "${var.docker_image}" == *.amazonaws.com* ]]; then
-  aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
-    | docker login --username AWS --password-stdin "$(echo "${var.docker_image}" | awk -F/ '{print $1}')"
+  echo "[user-data] ECR login"
+  aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$(echo "${var.docker_image}" | awk -F/ '{print $1}')"
 fi
+
 
 cat >/home/ec2-user/docker-compose.yml <<'YML'
 version: "3.8"
@@ -115,7 +126,7 @@ services:
   web:
     image: "__IMAGE__"
     ports:
-      - "80:3000"
+      - "80:3000"         # instance:80 -> container:3000
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
@@ -148,8 +159,6 @@ services:
 YML
 
 
-sed -i 's#__IMAGE__#${var.docker_image}#g' /home/ec2-user/docker-compose.yml
-
 cat >/home/ec2-user/prometheus.yml <<'PROM'
 global:
   scrape_interval: 15s
@@ -163,45 +172,54 @@ scrape_configs:
       - targets: ['localhost:3000']
 PROM
 
+
+sed -i 's#__IMAGE__#${var.docker_image}#g' /home/ec2-user/docker-compose.yml
+
 chown ec2-user:ec2-user /home/ec2-user/docker-compose.yml /home/ec2-user/prometheus.yml
 
 
+echo "[user-data] docker-compose up -d"
 cd /home/ec2-user
 docker-compose up -d > /var/log/docker-compose.log 2>&1 || true
 
 
+echo "[user-data] Installing CloudWatch Agent"
 dnf -y install amazon-cloudwatch-agent
-cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<JSON
-{
-  "metrics": {
-    "namespace": "DevOpsThrive/EC2",
-    "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
-    "aggregation_dimensions": [["InstanceId"]],
-    "metrics_collected": {
-      "cpu": { "measurement": ["cpu_usage_idle","cpu_usage_user","cpu_usage_system"], "metrics_collection_interval": 60 },
-      "mem": { "measurement": ["mem_used_percent"], "metrics_collection_interval": 60 }
-    }
-  },
-  "logs": {
-    "logs_collected": {
-      "files": {
-        "collect_list": [
-          { "file_path": "/var/log/messages", "log_group_name": "/aws/${var.project_name}/messages", "log_stream_name": "{instance_id}" },
-          { "file_path": "/var/log/docker-compose.log", "log_group_name": "/aws/${var.project_name}/docker", "log_stream_name": "{instance_id}" }
-        ]
+
+  cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<JSON
+  {
+    "logs": {
+      "logs_collected": {
+        "files": {
+          "collect_list": [
+            { "file_path": "/var/log/cloud-init-output.log", "log_group_name": "/aws/${var.project_name}/cloud-init", "log_stream_name": "{instance_id}" },
+            { "file_path": "/var/log/user-data.log",          "log_group_name": "/aws/${var.project_name}/user-data",  "log_stream_name": "{instance_id}" },
+            { "file_path": "/var/log/docker-compose.log",     "log_group_name": "/aws/${var.project_name}/docker",     "log_stream_name": "{instance_id}" }
+          ]
+        }
+      }
+    },
+    "metrics": {
+      "namespace": "DevOpsThrive/EC2",
+      "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
+      "metrics_collected": {
+        "cpu": { "measurement": ["cpu_usage_idle","cpu_usage_user","cpu_usage_system"], "metrics_collection_interval": 60 },
+        "mem": { "measurement": ["mem_used_percent"], "metrics_collection_interval": 60 }
       }
     }
   }
-}
-JSON
-systemctl enable amazon-cloudwatch-agent
-systemctl restart amazon-cloudwatch-agent
+  JSON
+
+  systemctl enable --now amazon-cloudwatch-agent
+echo "[user-data] Bootstrap complete at $(date)"
 EOT
   )
 
   tag_specifications {
     resource_type = "instance"
-    tags          = { Name = "${var.project_name}-ec2" }
+    tags = {
+      Name = "${var.project_name}-ec2"
+    }
   }
 
   lifecycle {
@@ -213,11 +231,14 @@ EOT
 # Auto Scaling Group + Target Tracking + Instance Refresh
 ########################################
 resource "aws_autoscaling_group" "app_asg" {
-  name                      = "${var.project_name}-asg"
-  min_size                  = var.min_size
-  max_size                  = var.max_size
-  desired_capacity          = var.desired_capacity
-  vpc_zone_identifier       = module.vpc.public_subnets
+  name             = "${var.project_name}-asg"
+  min_size         = var.min_size
+  max_size         = var.max_size
+  desired_capacity = var.desired_capacity
+
+  # Use private subnets (instances get internet via NAT)
+  vpc_zone_identifier = module.vpc.private_subnets
+
   health_check_type         = "ELB"
   health_check_grace_period = 120
 
@@ -236,6 +257,7 @@ resource "aws_autoscaling_group" "app_asg" {
     propagate_at_launch = true
   }
 
+  # Roll instances when Launch Template changes
   instance_refresh {
     strategy = "Rolling"
     preferences {
@@ -264,4 +286,3 @@ resource "aws_autoscaling_policy" "req_per_target" {
     target_value = 100
   }
 }
-
