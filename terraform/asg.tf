@@ -112,7 +112,7 @@ resource "aws_launch_template" "app_lt" {
         image: "${var.docker_image}"
         restart: unless-stopped
         ports:
-          - "80:3000"
+          - "80:80"
         environment:
           NODE_ENV: "production"
     YML
