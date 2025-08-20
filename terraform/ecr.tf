@@ -6,13 +6,13 @@ resource "aws_ecr_repository" "app_repo" {
   }
 
   tags = {
-    Name = "aws-devops-thrive-app"
+    Name        = "aws-devops-thrive-app"
     Environment = "dev"
   }
 
   lifecycle {
     prevent_destroy = true
-    ignore_changes = [tags]
+    ignore_changes  = [tags]
   }
 }
 
