@@ -28,17 +28,21 @@ jobs:
       uses: aws-actions/amazon-ecr-login@v1
 
     - name: Extract ECR repository URI
-      id: get-ecr-uri
       run: |
-        echo "REPO_URI=$(aws ecr describe-repositories --repository-names $ECR_REPO_NAME --region $AWS_REGION --query 'repositories[0].repositoryUri' --output text)" >> $GITHUB_ENV
+        REPO_URI=$(aws ecr describe-repositories \
+          --repository-names $ECR_REPO_NAME \
+          --region $AWS_REGION \
+          --query 'repositories[0].repositoryUri' \
+          --output text)
+        echo "REPO_URI=$REPO_URI" >> $GITHUB_ENV
 
     - name: Build Docker image
       run: |
-        docker build -t $REPO_URI:latest ./app
+        docker build -t ${{ env.REPO_URI }}:latest ./app
 
     - name: Push Docker image to ECR
       run: |
-        docker push $REPO_URI:latest
+        docker push ${{ env.REPO_URI }}:latest
 
     - name: Setup Terraform
       uses: hashicorp/setup-terraform@v3
@@ -48,9 +52,9 @@ jobs:
       working-directory: ./terraform
 
     - name: Terraform Plan
-      run: terraform plan -var="docker_image=$REPO_URI:latest"
+      run: terraform plan -var="docker_image=${{ env.REPO_URI }}:latest"
       working-directory: ./terraform
 
     - name: Terraform Apply
-      run: terraform apply -auto-approve -var="docker_image=$REPO_URI:latest"
+      run: terraform apply -auto-approve -var="docker_image=${{ env.REPO_URI }}:latest"
       working-directory: ./terraform
