@@ -94,7 +94,7 @@ cd aws-devops-thrive
 
 aws configure
 
-# Enter the following:
+# Enter the following details:
 AWS Access Key ID:     <your key>
 AWS Secret Access Key: <your secret>
 Default region:        us-east-1
@@ -109,4 +109,5 @@ aws dynamodb create-table \
   --attribute-definitions AttributeName=LockID,AttributeType=S \
   --key-schema AttributeName=LockID,KeyType=HASH \
   --provisioned-throughput ReadCapacityUnits=5,WriteCapacityUnits=5
+
 
