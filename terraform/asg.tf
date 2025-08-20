@@ -5,10 +5,25 @@ data "aws_ami" "amazon_linux" {
   most_recent = true
   owners      = ["amazon"]
 
-  filter { name = "name"                values = ["al2023-ami-*-kernel-6.1-*"] }
-  filter { name = "architecture"        values = ["x86_64"] }
-  filter { name = "virtualization-type" values = ["hvm"] }
-  filter { name = "root-device-type"    values = ["ebs"] }
+  filter {
+    name   = "name"
+    values = ["al2023-ami-*-kernel-6.1-*"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
+  }
 }
 
 ########################################
@@ -64,7 +79,9 @@ resource "aws_launch_template" "app_lt" {
   key_name               = var.ec2_key_pair_name
   vpc_security_group_ids = [aws_security_group.web_sg.id]
 
-  iam_instance_profile { name = aws_iam_instance_profile.ec2_profile.name }
+  iam_instance_profile {
+    name = aws_iam_instance_profile.ec2_profile.name
+  }
 
   user_data = base64encode(<<-EOF
     #!/bin/bash
@@ -220,7 +237,6 @@ resource "aws_autoscaling_group" "app_asg" {
     propagate_at_launch = true
   }
 
-  # Roll instances automatically when the Launch Template changes (e.g., new image tag)
   instance_refresh {
     strategy = "Rolling"
     preferences {
