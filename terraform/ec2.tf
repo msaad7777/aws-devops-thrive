@@ -20,12 +20,12 @@ resource "aws_instance" "app_server" {
               
               yum install -y git
               git clone https://github.com/msaad7777/aws-devops-thrive.git /home/ec2-user/app
-
+              
+              chown -R ec2-user:ec2-user /home/ec2-user/app
               cd /home/ec2-user/app/app
               
               echo "DOCKER_IMAGE=${var.docker_image}" > .env
-
-              docker-compose up -d --build
+              docker-compose up -d --build > /var/log/docker-compose.log 2>&1
               EOF
 
   tags = {
