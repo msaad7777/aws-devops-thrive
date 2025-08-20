@@ -9,6 +9,11 @@ resource "aws_ecr_repository" "app_repo" {
     Name = "aws-devops-thrive-app"
     Environment = "dev"
   }
+
+  lifecycle {
+    prevent_destroy = true
+    ignore_changes = [tags]
+  }
 }
 
 output "ecr_repository_url" {
