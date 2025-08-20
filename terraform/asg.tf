@@ -75,7 +75,6 @@ resource "aws_launch_template" "app_lt" {
     export AWS_DEFAULT_REGION="${var.aws_region}"
     export PROJECT_NAME="${var.project_name}"
 
-    # Amazon Linux 2023 uses dnf
     dnf -y update
     dnf -y install docker jq awscli
 
@@ -83,26 +82,25 @@ resource "aws_launch_template" "app_lt" {
     systemctl start docker
     usermod -aG docker ec2-user || true
 
-    # docker-compose
     curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" \
       -o /usr/local/bin/docker-compose
     chmod +x /usr/local/bin/docker-compose
     ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
 
-    # Login to ECR (only if image is from ECR)
+    # Login to ECR if image is in ECR
     if [[ "${var.docker_image}" == *.amazonaws.com* ]]; then
       aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
         | docker login --username AWS --password-stdin "$(echo "${var.docker_image}" | awk -F/ '{print $1}')"
     fi
 
-    # Compose file
-    cat >/home/ec2-user/docker-compose.yml <<'YML'
+    # Compose file (Terraform interpolates ${var.docker_image})
+    cat >/home/ec2-user/docker-compose.yml <<YML
     services:
       app:
         image: "${var.docker_image}"
         restart: unless-stopped
         ports:
-          - "80:3000"   # container listens on 3000; ALB hits 80 on instance
+          - "80:3000"
         environment:
           NODE_ENV: "production"
     YML
@@ -110,13 +108,13 @@ resource "aws_launch_template" "app_lt" {
     chown ec2-user:ec2-user /home/ec2-user/docker-compose.yml
     cd /home/ec2-user && docker-compose up -d
 
-    # CloudWatch Agent (metrics + logs)
+    # CloudWatch Agent config
     dnf -y install amazon-cloudwatch-agent
-    cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'JSON'
+    cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<JSON
     {
       "metrics": {
         "namespace": "DevOpsThrive/EC2",
-        "append_dimensions": { "InstanceId": "${aws:InstanceId}" },
+        "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
         "aggregation_dimensions": [["InstanceId"]],
         "metrics_collected": {
           "cpu": { "measurement": ["cpu_usage_idle","cpu_usage_user","cpu_usage_system"], "metrics_collection_interval": 60 },
@@ -127,8 +125,8 @@ resource "aws_launch_template" "app_lt" {
         "logs_collected": {
           "files": {
             "collect_list": [
-              { "file_path": "/var/log/messages", "log_group_name": "/aws/${PROJECT_NAME}/messages", "log_stream_name": "{instance_id}" },
-              { "file_path": "/var/log/docker-compose.log", "log_group_name": "/aws/${PROJECT_NAME}/docker", "log_stream_name": "{instance_id}" }
+              { "file_path": "/var/log/messages", "log_group_name": "/aws/${var.project_name}/messages", "log_stream_name": "{instance_id}" },
+              { "file_path": "/var/log/docker-compose.log", "log_group_name": "/aws/${var.project_name}/docker", "log_stream_name": "{instance_id}" }
             ]
           }
         }
@@ -139,6 +137,7 @@ resource "aws_launch_template" "app_lt" {
     systemctl restart amazon-cloudwatch-agent
   EOF
   )
+
 
   tag_specifications {
     resource_type = "instance"
