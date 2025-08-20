@@ -58,3 +58,7 @@ jobs:
     - name: Terraform Apply
       run: terraform apply -auto-approve -var="docker_image=${{ env.REPO_URI }}:latest"
       working-directory: ./terraform
+
+    - name: Show Output
+      run: terraform output
+      working-directory: ./terraform

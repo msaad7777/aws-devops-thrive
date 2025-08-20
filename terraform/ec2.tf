@@ -1,23 +1,35 @@
 resource "aws_instance" "app_server" {
-ami = data.aws_ami.amazon_linux.id
-instance_type = "t3.micro"
-subnet_id = module.vpc.public_subnets[0]
-vpc_security_group_ids = [aws_security_group.web_sg.id]
-associate_public_ip_address = true
-key_name = var.ec2_key_pair_name
+  ami                    = data.aws_ami.amazon_linux.id
+  instance_type          = "t3.micro"
+  subnet_id              = module.vpc.public_subnets[0]
+  vpc_security_group_ids = [aws_security_group.web_sg.id]
+  associate_public_ip_address = true
+  key_name               = var.ec2_key_pair_name
 
+  user_data = <<-EOF
+              #!/bin/bash
+              yum update -y
+              amazon-linux-extras install docker -y
+              service docker start
+              usermod -a -G docker ec2-user
+              
+              # Install Docker Compose
+              curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+              chmod +x /usr/local/bin/docker-compose
+              ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+              
+              # Optional: Run your Docker container directly (from var)
+              docker run -d -p 80:80 ${var.docker_image}
+              
+              # Optional: If using Docker Compose, uncomment below
+              yum install -y git
+              git clone https://github.com/msaad7777/aws-devops-thrive.git /home/ec2-user/app
+              cd /home/ec2-user/app
+              echo "DOCKER_IMAGE=${var.docker_image}" > .env
+              docker-compose up -d --build
+              EOF
 
-user_data = <<-EOF
-#!/bin/bash
-yum update -y
-amazon-linux-extras install docker -y
-service docker start
-usermod -a -G docker ec2-user
-docker run -d -p 80:80 ${var.docker_image}
-EOF
-
-
-tags = {
-Name = "AppEC2"
-}
+  tags = {
+    Name = "AppEC2"
+  }
 }
