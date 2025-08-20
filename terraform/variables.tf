@@ -9,3 +9,15 @@ variable "project_name" {
   type        = string
   default     = "aws-devops-thrive"
 }
+
+variable "ec2_key_pair_name" {
+  description = "EC2 key pair name for SSH"
+  type        = string
+  default     = "aws-devops-thrive-key"
+}
+
+variable "docker_image" {
+  description = "Docker image to deploy on EC2"
+  type        = string
+  default     = "msaad7777/aws-devops-thrive:latest"
+}
