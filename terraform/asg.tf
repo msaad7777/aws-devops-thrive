@@ -1,5 +1,5 @@
 ########################################
-# AMI (Amazon Linux 2023)
+# AMI (Amazon Linux 2023, x86_64)
 ########################################
 data "aws_ami" "amazon_linux" {
   most_recent = true
@@ -8,6 +8,18 @@ data "aws_ami" "amazon_linux" {
   filter {
     name   = "name"
     values = ["al2023-ami-*-kernel-6.1-*"]
+  }
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
   }
 }
 
@@ -137,7 +149,6 @@ resource "aws_launch_template" "app_lt" {
     systemctl restart amazon-cloudwatch-agent
   EOF
   )
-
 
   tag_specifications {
     resource_type = "instance"
