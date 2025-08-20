@@ -33,4 +33,6 @@ resource "aws_instance" "app_server" {
   tags = {
     Name = "AppEC2"
   }
+
+  depends_on = [aws_security_group.web_sg]
 }
