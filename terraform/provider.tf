@@ -6,24 +6,20 @@ terraform {
     }
   }
   required_version = ">= 1.3.0"
-}
 
+  # keep your backend "s3" block here if you already have one
+  # backend "s3" {
+  #   bucket = "your-bucket"
+  #   key    = "your/key.tfstate"
+  #   region = "us-east-1"
+  #   dynamodb_table = "your-lock-table"
+  # }
+}
 
 provider "aws" {
   region = var.aws_region
 }
 
-data "aws_ami" "amazon_linux" {
-  most_recent = true
-  owners      = ["amazon"]
-
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-}
+/* REMOVED: duplicate AMI data source.
+data "aws_ami" "amazon_linux" { ... }
+*/
