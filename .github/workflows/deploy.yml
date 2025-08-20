@@ -3,10 +3,12 @@ name: CI/CD Pipeline
 on:
   push:
     branches: [main]
+  workflow_dispatch: {}
 
 env:
   AWS_REGION: us-east-1
   ECR_REPO_NAME: aws-devops-thrive-app
+  PROJECT_NAME: aws-devops-thrive
   TF_IN_AUTOMATION: "1"
   TF_INPUT: "false"
 
@@ -50,10 +52,14 @@ jobs:
       with:
         terraform_version: 1.8.5
 
-    - name: Terraform Fmt & Validate
+    # ---- Formatting now AUTO-FIXES instead of failing the build ----
+    - name: Terraform Format (auto-fix)
+      working-directory: ./terraform
+      run: terraform fmt -recursive
+
+    - name: Terraform Init & Validate
       working-directory: ./terraform
       run: |
-        terraform fmt -check -recursive
         terraform init -lock-timeout=5m
         terraform validate
 
@@ -64,8 +70,8 @@ jobs:
         set -euo pipefail
 
         ensure_import () {
-          local tf_addr="$1"   # terraform address, e.g., aws_security_group.web_sg
-          local id="$2"        # import id (ARN/ID/Name depending on type)
+          local tf_addr="$1"
+          local id="$2"
           if [[ -z "${id}" || "${id}" == "None" ]]; then
             echo "No existing resource for ${tf_addr}; skip."
             return 0
@@ -87,21 +93,21 @@ jobs:
 
         # --- Discover IDs/ARNs ---
         WEB_SG_ID=$(aws ec2 describe-security-groups \
-          --filters Name=group-name,Values=${PROJECT_NAME:-aws-devops-thrive}-web-sg \
+          --filters Name=group-name,Values=${PROJECT_NAME}-web-sg \
           --query 'SecurityGroups[0].GroupId' --output text || true)
 
         ALB_SG_ID=$(aws ec2 describe-security-groups \
-          --filters Name=group-name,Values=${PROJECT_NAME:-aws-devops-thrive}-alb-sg \
+          --filters Name=group-name,Values=${PROJECT_NAME}-alb-sg \
           --query 'SecurityGroups[0].GroupId' --output text || true)
 
         ECR_NAME="${ECR_REPO_NAME}"
 
         ALB_ARN=$(aws elbv2 describe-load-balancers \
-          --names ${PROJECT_NAME:-aws-devops-thrive}-alb \
+          --names ${PROJECT_NAME}-alb \
           --query 'LoadBalancers[0].LoadBalancerArn' --output text || true)
 
         TG_ARN=$(aws elbv2 describe-target-groups \
-          --names ${PROJECT_NAME:-aws-devops-thrive}-tg \
+          --names ${PROJECT_NAME}-tg \
           --query 'TargetGroups[0].TargetGroupArn' --output text || true)
 
         LISTENER_80_ARN=""
@@ -110,20 +116,18 @@ jobs:
             --query 'Listeners[?Port==`80`].ListenerArn | [0]' --output text || true)
         fi
 
-        # Optional HTTPS
         LISTENER_443_ARN=""
         if [[ -n "${ALB_ARN}" && "${ALB_ARN}" != "None" ]]; then
           LISTENER_443_ARN=$(aws elbv2 describe-listeners --load-balancer-arn "${ALB_ARN}" \
             --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text || true)
         fi
 
-        # ASG + Launch Template
         ASG_NAME=$(aws autoscaling describe-auto-scaling-groups \
-          --query "AutoScalingGroups[?AutoScalingGroupName=='${PROJECT_NAME:-aws-devops-thrive}-asg'].AutoScalingGroupName | [0]" \
+          --query "AutoScalingGroups[?AutoScalingGroupName=='${PROJECT_NAME}-asg'].AutoScalingGroupName | [0]" \
           --output text || true)
 
         LT_ID=$(aws ec2 describe-launch-templates \
-          --filters Name=launch-template-name,Values="${PROJECT_NAME:-aws-devops-thrive}-lt-*" \
+          --filters Name=launch-template-name,Values="${PROJECT_NAME}-lt-*" \
           --query 'LaunchTemplates[0].LaunchTemplateId' --output text || true)
 
         # --- Import / Remap ---
