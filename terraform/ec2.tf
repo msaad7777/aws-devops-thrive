@@ -10,8 +10,9 @@ resource "aws_instance" "app_server" {
               #!/bin/bash
               yum update -y
               amazon-linux-extras install docker -y
-              service docker start
-              usermod -a -G docker ec2-user
+              systemctl enable docker
+              systemctl start docker
+              usermod -aG docker ec2-user
               
               # Install Docker Compose
               curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
