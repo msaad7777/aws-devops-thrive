@@ -1,10 +1,10 @@
 resource "aws_instance" "app_server" {
-  ami                    = data.aws_ami.amazon_linux.id
-  instance_type          = "t3.micro"
-  subnet_id              = module.vpc.public_subnets[0]
-  vpc_security_group_ids = [aws_security_group.web_sg.id]
+  ami                         = data.aws_ami.amazon_linux.id
+  instance_type               = "t3.micro"
+  subnet_id                   = module.vpc.public_subnets[0]
+  vpc_security_group_ids      = [aws_security_group.web_sg.id]
   associate_public_ip_address = true
-  key_name               = var.ec2_key_pair_name
+  key_name                    = var.ec2_key_pair_name
 
   user_data = <<-EOF
               #!/bin/bash
@@ -13,20 +13,23 @@ resource "aws_instance" "app_server" {
               systemctl enable docker
               systemctl start docker
               usermod -aG docker ec2-user
-              
-              # Install Docker Compose
+
+              # Install Docker Compose (latest release)
               curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
               chmod +x /usr/local/bin/docker-compose
               ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
-              
-              # Optional: Run your Docker container directly (from var)
-              docker run -d -p 80:80 ${var.docker_image}
-              
-              # Optional: If using Docker Compose, uncomment below
+
+              # Install Git
               yum install -y git
+
+              # Clone GitHub Repo
               git clone https://github.com/msaad7777/aws-devops-thrive.git /home/ec2-user/app
               cd /home/ec2-user/app
+
+              # Set env file for Compose
               echo "DOCKER_IMAGE=${var.docker_image}" > .env
+
+              # Start app via Docker Compose
               docker-compose up -d --build
               EOF
 
@@ -34,5 +37,6 @@ resource "aws_instance" "app_server" {
     Name = "AppEC2"
   }
 
+  # Ensure security group is created before instance
   depends_on = [aws_security_group.web_sg]
 }
