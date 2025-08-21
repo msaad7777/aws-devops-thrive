@@ -5,29 +5,14 @@ data "aws_ami" "amazon_linux" {
   most_recent = true
   owners      = ["amazon"]
 
-  filter {
-    name   = "name"
-    values = ["al2023-ami-*-kernel-6.1-*"]
-  }
-
-  filter {
-    name   = "architecture"
-    values = ["x86_64"]
-  }
-
-  filter {
-    name   = "virtualization-type"
-    values = ["hvm"]
-  }
-
-  filter {
-    name   = "root-device-type"
-    values = ["ebs"]
-  }
+  filter { name = "name"                values = ["al2023-ami-*-kernel-6.1-*"] }
+  filter { name = "architecture"        values = ["x86_64"] }
+  filter { name = "virtualization-type" values = ["hvm"] }
+  filter { name = "root-device-type"    values = ["ebs"] }
 }
 
 ########################################
-# IAM for EC2 -> ECR (pull) + CloudWatch Agent
+# IAM for EC2 -> ECR (pull) + CloudWatch Agent + SSM
 ########################################
 resource "aws_iam_role" "ec2_role" {
   name = "${var.project_name}-ec2-role"
@@ -49,6 +34,11 @@ resource "aws_iam_role_policy_attachment" "ecr_read" {
 resource "aws_iam_role_policy_attachment" "cw_agent" {
   role       = aws_iam_role.ec2_role.name
   policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
+}
+
+resource "aws_iam_role_policy_attachment" "ssm_core" {
+  role       = aws_iam_role.ec2_role.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
 # CloudWatch log groups (bootstrap + compose logs)
@@ -79,10 +69,15 @@ resource "aws_launch_template" "app_lt" {
   name_prefix            = "${var.project_name}-lt-"
   update_default_version = true
 
-  image_id               = data.aws_ami.amazon_linux.id
-  instance_type          = "t3.micro"
-  key_name               = var.ec2_key_pair_name
-  vpc_security_group_ids = [aws_security_group.web_sg.id]
+  image_id      = data.aws_ami.amazon_linux.id
+  instance_type = "t3.micro"
+  key_name      = var.ec2_key_pair_name
+
+  # Explicit NIC: no public IPs; ALB reaches instances inside VPC; egress via NAT
+  network_interfaces {
+    security_groups             = [aws_security_group.web_sg.id]
+    associate_public_ip_address = false
+  }
 
   iam_instance_profile {
     name = aws_iam_instance_profile.ec2_profile.name
@@ -92,34 +87,37 @@ resource "aws_launch_template" "app_lt" {
 #!/bin/bash
 set -euxo pipefail
 
-
+# Log user-data to console + file
 exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 echo "[user-data] Starting bootstrap at $(date)"
 
 export AWS_DEFAULT_REGION="${var.aws_region}"
 export PROJECT_NAME="${var.project_name}"
 
-
+# Base tooling
 dnf -y update
-dnf -y install docker jq awscli curl
+dnf -y install docker jq awscli curl amazon-ssm-agent
 
 systemctl enable --now docker
 usermod -aG docker ec2-user || true
 
+# SSM Agent (should be present on AL2023, ensure enabled)
+systemctl enable --now amazon-ssm-agent || true
 
+# docker-compose
 echo "[user-data] Installing docker-compose"
 curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 chmod +x /usr/local/bin/docker-compose
 ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
 docker-compose version || true
 
-
+# ECR login if image is in ECR
 if [[ "${var.docker_image}" == *.amazonaws.com* ]]; then
   echo "[user-data] ECR login"
   aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$(echo "${var.docker_image}" | awk -F/ '{print $1}')"
 fi
 
-
+# Compose file
 cat >/home/ec2-user/docker-compose.yml <<'YML'
 version: "3.8"
 services:
@@ -128,6 +126,7 @@ services:
     ports:
       - "80:3000"         # instance:80 -> container:3000
     restart: unless-stopped
+    # NOTE: This healthcheck runs inside the container and needs curl in the image
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
       interval: 30s
@@ -158,7 +157,7 @@ services:
     restart: unless-stopped
 YML
 
-
+# Prometheus scrape config
 cat >/home/ec2-user/prometheus.yml <<'PROM'
 global:
   scrape_interval: 15s
@@ -172,45 +171,42 @@ scrape_configs:
       - targets: ['localhost:3000']
 PROM
 
-
+# Inject image into compose
 sed -i 's#__IMAGE__#${var.docker_image}#g' /home/ec2-user/docker-compose.yml
-
 chown ec2-user:ec2-user /home/ec2-user/docker-compose.yml /home/ec2-user/prometheus.yml
 
-
+# Start stack
 echo "[user-data] docker-compose up -d"
 cd /home/ec2-user
 docker-compose up -d > /var/log/docker-compose.log 2>&1 || true
 
-
-echo "[user-data] Installing CloudWatch Agent"
-dnf -y install amazon-cloudwatch-agent
-
-  cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<JSON
-  {
-    "logs": {
-      "logs_collected": {
-        "files": {
-          "collect_list": [
-            { "file_path": "/var/log/cloud-init-output.log", "log_group_name": "/aws/${var.project_name}/cloud-init", "log_stream_name": "{instance_id}" },
-            { "file_path": "/var/log/user-data.log",          "log_group_name": "/aws/${var.project_name}/user-data",  "log_stream_name": "{instance_id}" },
-            { "file_path": "/var/log/docker-compose.log",     "log_group_name": "/aws/${var.project_name}/docker",     "log_stream_name": "{instance_id}" }
-          ]
-        }
-      }
-    },
-    "metrics": {
-      "namespace": "DevOpsThrive/EC2",
-      "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
-      "metrics_collected": {
-        "cpu": { "measurement": ["cpu_usage_idle","cpu_usage_user","cpu_usage_system"], "metrics_collection_interval": 60 },
-        "mem": { "measurement": ["mem_used_percent"], "metrics_collection_interval": 60 }
+# CloudWatch Agent config (logs + basic metrics)
+echo "[user-data] Installing CloudWatch Agent config"
+cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<JSON
+{
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          { "file_path": "/var/log/cloud-init-output.log", "log_group_name": "/aws/${var.project_name}/cloud-init", "log_stream_name": "{instance_id}" },
+          { "file_path": "/var/log/user-data.log",          "log_group_name": "/aws/${var.project_name}/user-data",  "log_stream_name": "{instance_id}" },
+          { "file_path": "/var/log/docker-compose.log",     "log_group_name": "/aws/${var.project_name}/docker",     "log_stream_name": "{instance_id}" }
+        ]
       }
     }
+  },
+  "metrics": {
+    "namespace": "DevOpsThrive/EC2",
+    "append_dimensions": { "InstanceId": "$${aws:InstanceId}" },
+    "metrics_collected": {
+      "cpu": { "measurement": ["cpu_usage_idle","cpu_usage_user","cpu_usage_system"], "metrics_collection_interval": 60 },
+      "mem": { "measurement": ["mem_used_percent"], "metrics_collection_interval": 60 }
+    }
   }
-  JSON
+}
+JSON
 
-  systemctl enable --now amazon-cloudwatch-agent
+systemctl enable --now amazon-cloudwatch-agent
 echo "[user-data] Bootstrap complete at $(date)"
 EOT
   )
@@ -236,7 +232,7 @@ resource "aws_autoscaling_group" "app_asg" {
   max_size         = var.max_size
   desired_capacity = var.desired_capacity
 
-  # Use private subnets (instances get internet via NAT)
+  # Use PRIVATE subnets (egress via NAT)
   vpc_zone_identifier = module.vpc.private_subnets
 
   health_check_type         = "ELB"
@@ -257,7 +253,7 @@ resource "aws_autoscaling_group" "app_asg" {
     propagate_at_launch = true
   }
 
-  # Roll instances when Launch Template changes
+  # Roll instances whenever the Launch Template changes
   instance_refresh {
     strategy = "Rolling"
     preferences {
