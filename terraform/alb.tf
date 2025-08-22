@@ -14,26 +14,24 @@ resource "aws_lb" "app_alb" {
 
 resource "aws_lb_target_group" "app_tg" {
   name        = "${var.project_name}-tg"
-  port        = 80
-  protocol    = "HTTP"
   vpc_id      = module.vpc.vpc_id
   target_type = "instance"
 
-  health_check {
-    path                = "/health"
-    protocol            = "HTTP"
-    matcher             = "200-399"
-    interval            = 30
-    timeout             = 5
-    healthy_threshold   = 2
-    unhealthy_threshold = 5
-  }
+  port     = 80 # matches host port from compose: "80:3000"
+  protocol = "HTTP"
 
-  tags = {
-    Name        = "${var.project_name}-tg"
-    Environment = "dev"
+  health_check {
+    protocol            = "HTTP"
+    port                = "traffic-port"
+    path                = "/" # <— change from "/health" to "/"
+    matcher             = "200-399"
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    timeout             = 5
+    interval            = 15
   }
 }
+
 
 resource "aws_lb_listener" "app_listener" {
   load_balancer_arn = aws_lb.app_alb.arn

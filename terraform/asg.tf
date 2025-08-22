@@ -91,7 +91,7 @@ resource "aws_launch_template" "app_lt" {
   # Explicit NIC: no public IPs; ALB reaches instances inside VPC; egress via NAT
   network_interfaces {
     security_groups             = [aws_security_group.web_sg.id]
-    associate_public_ip_address = false
+    associate_public_ip_address = true
   }
 
   iam_instance_profile {
@@ -102,46 +102,45 @@ resource "aws_launch_template" "app_lt" {
 #!/bin/bash
 set -euxo pipefail
 
-# Log user-data to console + file
 exec > >(tee -a /var/log/user-data.log | logger -t user-data -s 2>/dev/console) 2>&1
 echo "[user-data] Starting bootstrap at $(date)"
 
 export AWS_DEFAULT_REGION="${var.aws_region}"
 export PROJECT_NAME="${var.project_name}"
 
-# Base tooling
+
 dnf -y update
 dnf -y install docker jq awscli curl amazon-ssm-agent
 
 systemctl enable --now docker
 usermod -aG docker ec2-user || true
 
-# SSM Agent (should be present on AL2023, ensure enabled)
+
 systemctl enable --now amazon-ssm-agent || true
 
-# docker-compose
+
 echo "[user-data] Installing docker-compose"
 curl -fsSL "https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
 chmod +x /usr/local/bin/docker-compose
 ln -sf /usr/local/bin/docker-compose /usr/bin/docker-compose
 docker-compose version || true
 
-# ECR login if image is in ECR
 if [[ "${var.docker_image}" == *.amazonaws.com* ]]; then
   echo "[user-data] ECR login"
   aws ecr get-login-password --region "$AWS_DEFAULT_REGION" | docker login --username AWS --password-stdin "$(echo "${var.docker_image}" | awk -F/ '{print $1}')"
 fi
 
-# Compose file
+
 cat >/home/ec2-user/docker-compose.yml <<'YML'
 version: "3.8"
 services:
   web:
     image: "__IMAGE__"
     ports:
-      - "80:3000"         # instance:80 -> container:3000
+      - "80:3000" 
+    environment:
+      - PORT=3000         
     restart: unless-stopped
-    # NOTE: This healthcheck runs inside the container and needs curl in the image
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
       interval: 30s
@@ -172,7 +171,7 @@ services:
     restart: unless-stopped
 YML
 
-# Prometheus scrape config
+
 cat >/home/ec2-user/prometheus.yml <<'PROM'
 global:
   scrape_interval: 15s
@@ -186,16 +185,16 @@ scrape_configs:
       - targets: ['localhost:3000']
 PROM
 
-# Inject image into compose
+
 sed -i 's#__IMAGE__#${var.docker_image}#g' /home/ec2-user/docker-compose.yml
 chown ec2-user:ec2-user /home/ec2-user/docker-compose.yml /home/ec2-user/prometheus.yml
 
-# Start stack
+
 echo "[user-data] docker-compose up -d"
 cd /home/ec2-user
 docker-compose up -d > /var/log/docker-compose.log 2>&1 || true
 
-# CloudWatch Agent config (logs + basic metrics)
+
 echo "[user-data] Installing CloudWatch Agent config"
 cat >/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<JSON
 {
@@ -248,7 +247,7 @@ resource "aws_autoscaling_group" "app_asg" {
   desired_capacity = var.desired_capacity
 
   # Use PRIVATE subnets (egress via NAT)
-  vpc_zone_identifier = module.vpc.private_subnets
+  vpc_zone_identifier = module.vpc.public_subnets
 
   health_check_type         = "ELB"
   health_check_grace_period = 120
